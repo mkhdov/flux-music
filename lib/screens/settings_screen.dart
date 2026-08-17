@@ -59,6 +59,18 @@ class SettingsScreen extends StatelessWidget {
           const Padding(
             padding: EdgeInsets.fromLTRB(20, 28, 20, 6),
             child: Text(
+              'STREAMING',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 1.1,
+              ),
+            ),
+          ),
+          const _YoutubeSessionCard(),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(20, 28, 20, 6),
+            child: Text(
               'ABOUT FLUX',
               style: TextStyle(
                 fontSize: 12,
@@ -117,4 +129,97 @@ class _ThemeOption extends StatelessWidget {
         : null,
     onTap: () => onTap(mode),
   );
+}
+
+class _YoutubeSessionCard extends StatefulWidget {
+  const _YoutubeSessionCard();
+  @override
+  State<_YoutubeSessionCard> createState() => _YoutubeSessionCardState();
+}
+
+class _YoutubeSessionCardState extends State<_YoutubeSessionCard> {
+  final _controller = TextEditingController();
+  bool _obscured = true;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final flux = context.watch<FluxProvider>();
+    final active = flux.isSignedIn;
+    return Card(
+      child: Column(
+        children: [
+          ListTile(
+            leading: Icon(
+              active
+                  ? Icons.verified_user_rounded
+                  : Icons.person_outline_rounded,
+            ),
+            title: Text(
+              active
+                  ? 'Signed-in YouTube session'
+                  : 'Anonymous YouTube session',
+            ),
+            subtitle: Text(
+              active
+                  ? 'Streams are resolved under your session, which can bypass '
+                        'bot-detection 403s that anonymous extraction hits.'
+                  : 'Paste the cookie header of a logged-in YouTube tab in '
+                        'your browser to resolve streams under your session.',
+            ),
+          ),
+          const Divider(height: 1),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+            child: TextField(
+              controller: _controller,
+              obscureText: _obscured,
+              decoration: InputDecoration(
+                border: const OutlineInputBorder(),
+                labelText: 'Session cookie',
+                hintText: 'Starts with CONSENT=...; SID=...; SAPISID=...',
+                suffixIcon: IconButton(
+                  icon: Icon(
+                    _obscured
+                        ? Icons.visibility_off_rounded
+                        : Icons.visibility_rounded,
+                  ),
+                  onPressed: () => setState(() => _obscured = !_obscured),
+                ),
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+            child: Row(
+              children: [
+                Expanded(
+                  child: FilledButton.icon(
+                    onPressed: () => flux.setSessionCookie(_controller.text),
+                    icon: const Icon(Icons.save_rounded),
+                    label: const Text('Save session'),
+                  ),
+                ),
+                if (active) ...[
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: flux.clearSessionCookie,
+                      icon: const Icon(Icons.delete_rounded),
+                      label: const Text('Clear'),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }

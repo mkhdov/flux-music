@@ -1,5 +1,8 @@
 import 'dart:async';
+import 'dart:developer' as developer;
 
+import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 
@@ -23,6 +26,7 @@ class FluxProvider extends ChangeNotifier {
     _completedSubscription = player.trackCompleted.listen(
       (_) => _onTrackCompleted(),
     );
+    _playbackErrorSubscription = player.playbackErrors.listen(_onPlaybackError);
   }
 
   final StorageService storage;
@@ -32,6 +36,7 @@ class FluxProvider extends ChangeNotifier {
   final PlayerService player;
   late final StreamSubscription<void> _playerSubscription;
   late final StreamSubscription<void> _completedSubscription;
+  late final StreamSubscription<PlayerException> _playbackErrorSubscription;
   List<Track> results = [];
   bool searching = false;
   String? searchError;
@@ -44,6 +49,8 @@ class FluxProvider extends ChangeNotifier {
   int _switchGeneration = 0;
   String? _prefetchedQueueForTrackId;
   int? _pendingQueueIndex;
+  String? _lastRetriedTrackId;
+  bool _retryingPlayback = false;
 
   bool get isPlayButtonLoading =>
       loadingTrackId != null && player.loadedTrackId != loadingTrackId;
@@ -102,6 +109,7 @@ class FluxProvider extends ChangeNotifier {
   Future<bool> play(Track track, {List<Track>? queue}) async {
     final sw = Stopwatch()..start();
     final generation = ++_switchGeneration;
+    _lastRetriedTrackId = null;
 
     loadingTrackId = track.id;
     actionError = null;
@@ -116,12 +124,14 @@ class FluxProvider extends ChangeNotifier {
         await player.setQueue([merged], 0);
       }
 
-      final uri = await _playbackUri(merged, sw: sw);
+      final stream = await _playbackUri(merged, sw: sw);
       if (generation != _switchGeneration) return false;
 
       await player.playStream(
         merged,
-        uri,
+        stream.url,
+        headers: stream.headers,
+        resolvedAt: stream.resolvedAt,
         queueIndex: player.queue.indexWhere((t) => t.id == track.id),
       );
       if (generation != _switchGeneration) return false;
@@ -133,6 +143,15 @@ class FluxProvider extends ChangeNotifier {
     } on YoutubeAudioException catch (error) {
       if (generation != _switchGeneration) return false;
       actionError = error.message;
+    } on PlayerException catch (error) {
+      // ExoPlayer reports a rejected stream (e.g. HttpDataSource 403) through
+      // the player error stream during playback, but a failure during the
+      // initial load surfaces here, synchronously from setAudioSource. Route
+      // both through the same fresh re-extraction fallback.
+      if (generation != _switchGeneration) return false;
+      started = true;
+      await _onPlaybackError(error);
+      return false;
     } catch (error) {
       if (generation != _switchGeneration) return false;
       actionError =
@@ -215,6 +234,7 @@ class FluxProvider extends ChangeNotifier {
     final track = player.queue[index];
 
     final generation = ++_switchGeneration;
+    _lastRetriedTrackId = null;
     _pendingQueueIndex = index;
     loadingTrackId = track.id;
     actionError = null;
@@ -223,10 +243,16 @@ class FluxProvider extends ChangeNotifier {
     var started = false;
     try {
       final merged = storage.downloaded(track.id) ?? track;
-      final uri = await _playbackUri(merged);
+      final stream = await _playbackUri(merged);
       if (generation != _switchGeneration) return;
 
-      await player.playStream(merged, uri, queueIndex: index);
+      await player.playStream(
+        merged,
+        stream.url,
+        headers: stream.headers,
+        resolvedAt: stream.resolvedAt,
+        queueIndex: index,
+      );
       if (generation != _switchGeneration) return;
       started = true;
       _pendingQueueIndex = null;
@@ -236,6 +262,10 @@ class FluxProvider extends ChangeNotifier {
     } on YoutubeAudioException catch (error) {
       if (generation != _switchGeneration) return;
       actionError = error.message;
+    } on PlayerException catch (error) {
+      if (generation != _switchGeneration) return;
+      started = true;
+      await _onPlaybackError(error);
     } catch (error) {
       if (generation != _switchGeneration) return;
       actionError = 'Could not play this track. Please retry.';
@@ -247,6 +277,156 @@ class FluxProvider extends ChangeNotifier {
         if (_pendingQueueIndex == index) _pendingQueueIndex = null;
         notifyListeners();
       }
+    }
+  }
+
+  /// Handles a playback failure reported by the native player.
+  ///
+  /// YouTube stream URLs are only valid for the client, IP, and moment they
+  /// were resolved for, so a source error (typically a 403
+  /// HttpDataSource$InvalidResponseCodeException) can mean the URL was fetched
+  /// without the right headers, the resolving IP no longer matches, or the
+  /// streaming layer blocked the request (bot detection).
+  ///
+  /// The failure is retried at most once, and only if the retry would issue a
+  /// request that actually differs from the one that failed: the stream is
+  /// re-extracted (the cached URL is dropped first) and the resulting URL is
+  /// compared against the failed one by bound-stream identity — CDN host,
+  /// itag, and the embedding IP recorded by googlevideo.
+  Future<void> _onPlaybackError(PlayerException error) async {
+    if (_retryingPlayback) return;
+    await _logPlaybackFailureDiagnostics();
+    _retryingPlayback = true;
+    try {
+      await _retryPlaybackAfterError();
+    } finally {
+      _retryingPlayback = false;
+    }
+  }
+
+  /// Records the evidence needed to tell the three 403 causes apart: URL
+  /// expiry, IP binding, and streaming-layer bot detection.
+  Future<void> _logPlaybackFailureDiagnostics() async {
+    final uri = player.lastStreamUri;
+    final resolvedAt = player.lastResolvedAt;
+    if (uri == null) return;
+
+    final now = DateTime.now();
+    final parameters = uri.queryParameters;
+    final expiryEpoch = int.tryParse(parameters['expire'] ?? '');
+    final expiresAt = expiryEpoch == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(expiryEpoch * 1000);
+    final urlIp = parameters['ip'];
+    final probeIp = await youtube.publicIp();
+
+    developer.log(
+      'playback error diagnostics '
+      'uri=$uri '
+      'urlIp=$urlIp probeIp=$probeIp '
+      'ipBindingExonerated=${urlIp != null && urlIp == probeIp} '
+      'itag=${parameters['itag']} '
+      'connectivity=${(await Connectivity().checkConnectivity()).join(',')} '
+      'resolvedAt=${resolvedAt?.toIso8601String() ?? '-'} '
+      'errorAt=${now.toIso8601String()} '
+      'resolveToErrorMs=${resolvedAt == null ? -1 : now.difference(resolvedAt).inMilliseconds} '
+      'expiresAt=${expiresAt?.toIso8601String() ?? '-'} '
+      'expiryRemainingMs=${expiresAt == null ? -1 : expiresAt.difference(now).inMilliseconds} '
+      'expiredBeforeRequest=${expiresAt != null && expiresAt.isBefore(now)}',
+      name: 'Flux.PlaybackRetry',
+    );
+  }
+
+  Future<void> _retryPlaybackAfterError() async {
+    final track = player.current;
+    if (track == null) return;
+
+    if (track.isDownloaded) {
+      actionError = 'Could not play this track. Please retry.';
+      loadingTrackId = null;
+      notifyListeners();
+      return;
+    }
+
+    if (_lastRetriedTrackId == track.id) {
+      _lastRetriedTrackId = null;
+      actionError =
+          'This stream is unavailable right now. Please try again later.';
+      loadingTrackId = null;
+      notifyListeners();
+      return;
+    }
+
+    // The request that just failed, before the cache is invalidated. Used to
+    // verify that the retry transmits a different request rather than
+    // recreating the failing one on a fresh ExoPlayer instance.
+    final failedUri = player.lastStreamUri;
+    final failedHeaders = player.lastStreamHeaders;
+
+    _lastRetriedTrackId = track.id;
+    loadingTrackId = track.id;
+    notifyListeners();
+
+    final generation = _switchGeneration;
+    try {
+      youtube.invalidateStream(track.id);
+      final stream = await _playbackUri(track);
+      if (generation != _switchGeneration) return;
+
+      // Byte-comparing URLs here would defeat the guard: every extraction
+      // mints fresh volatile query parameters, so two URLs for the same bound
+      // stream never compare equal. Compare the bound-stream identity
+      // instead: same CDN host + same itag + same embedding IP is the same
+      // deterministic request, and replaying it would reproduce the 403.
+      final urlChanged =
+          failedUri == null || !sameBoundStream(failedUri, stream.url);
+      final headersChanged = !mapEquals(failedHeaders, stream.headers);
+
+      developer.log(
+        'retry decision urlChanged=$urlChanged '
+        'headersChanged=$headersChanged '
+        'sameBoundStream=${!urlChanged} '
+        'previousHost=${failedUri?.host ?? '-'} newHost=${stream.url.host} '
+        'previousItag=${failedUri?.queryParameters['itag'] ?? '-'} '
+        'newItag=${stream.url.queryParameters['itag']} '
+        'previousIp=${failedUri?.queryParameters['ip'] ?? '-'} '
+        'newIp=${stream.url.queryParameters['ip']} '
+        'previousExpire=${failedUri?.queryParameters['expire'] ?? '-'} '
+        'newExpire=${stream.url.queryParameters['expire']}',
+        name: 'Flux.PlaybackRetry',
+      );
+
+      if (!urlChanged && !headersChanged) {
+        // Re-extraction returned the identical bound stream: same CDN host,
+        // same itag, same embedding IP. Replaying it against a new ExoPlayer
+        // instance would reproduce the same 403, so surface the failure
+        // instead of retrying.
+        _lastRetriedTrackId = null;
+        actionError =
+            'This stream is unavailable right now. Please try again later.';
+        loadingTrackId = null;
+        notifyListeners();
+        return;
+      }
+
+      final index = player.queue.indexWhere((item) => item.id == track.id);
+      await player.playStream(
+        track,
+        stream.url,
+        headers: stream.headers,
+        resolvedAt: stream.resolvedAt,
+        queueIndex: index == -1 ? null : index,
+      );
+      _lastRetriedTrackId = null;
+      notifyListeners();
+    } on YoutubeAudioException catch (e) {
+      actionError = e.message;
+      loadingTrackId = null;
+      notifyListeners();
+    } catch (_) {
+      actionError = 'Could not play this track. Please retry.';
+      loadingTrackId = null;
+      notifyListeners();
     }
   }
 
@@ -267,8 +447,14 @@ class FluxProvider extends ChangeNotifier {
     );
   }
 
-  Future<Uri> _playbackUri(Track track, {Stopwatch? sw}) async {
-    if (track.isDownloaded) return Uri.file(track.localPath!);
+  Future<ResolvedAudioStream> _playbackUri(Track track, {Stopwatch? sw}) async {
+    if (track.isDownloaded) {
+      return (
+        url: Uri.file(track.localPath!),
+        headers: const <String, String>{},
+        resolvedAt: DateTime.now(),
+      );
+    }
     return audioCache.playbackUri(track, sw: sw);
   }
 
@@ -338,6 +524,27 @@ class FluxProvider extends ChangeNotifier {
 
   Future<void> setTheme(String mode) async {
     await storage.setThemeMode(mode);
+    notifyListeners();
+  }
+
+  String? get sessionCookie => storage.audioSessionCookie;
+  bool get isSignedIn =>
+      youtube.isSignedIn && (sessionCookie?.isNotEmpty ?? false);
+
+  /// Registers a signed-in YouTube session cookie with the extraction and
+  /// playback clients. See [YoutubeService.setSessionCookie].
+  Future<void> setSessionCookie(String value) async {
+    final normalized = value
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    await storage.setAudioSessionCookie(normalized);
+    youtube.setSessionCookie(normalized.isEmpty ? null : normalized);
+    notifyListeners();
+  }
+
+  Future<void> clearSessionCookie() async {
+    await storage.setAudioSessionCookie(null);
+    youtube.setSessionCookie(null);
     notifyListeners();
   }
 
@@ -420,6 +627,7 @@ class FluxProvider extends ChangeNotifier {
     _sleepTicker?.cancel();
     await _completedSubscription.cancel();
     await _playerSubscription.cancel();
+    await _playbackErrorSubscription.cancel();
     await player.dispose();
     youtube.dispose();
     super.dispose();

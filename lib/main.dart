@@ -20,7 +20,7 @@ Future<void> main() async {
   );
   final storage = StorageService();
   await storage.init();
-  final youtube = YoutubeService();
+  final youtube = YoutubeService(sessionCookie: storage.audioSessionCookie);
   final audioCache = AudioCacheService(youtube);
   await audioCache.init();
   runApp(
@@ -30,7 +30,7 @@ Future<void> main() async {
         youtube,
         audioCache,
         DownloadService(youtube),
-        PlayerService(),
+        PlayerService(youtube),
       ),
       child: const FluxApp(),
     ),

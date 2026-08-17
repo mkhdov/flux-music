@@ -21,7 +21,7 @@ class AudioCacheService {
 
   Future<void> init() async {}
 
-  Future<Uri> playbackUri(Track track, {Stopwatch? sw}) =>
+  Future<ResolvedAudioStream> playbackUri(Track track, {Stopwatch? sw}) =>
       _youtube.audioUri(track, sw: sw);
 
   Future<void> prefetch(Track track) => _youtube.audioUri(

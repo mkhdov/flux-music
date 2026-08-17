@@ -81,17 +81,27 @@ class _CoverGradientBackgroundState extends State<CoverGradientBackground> {
     Color(0xFF16213E),
     Color(0xFF0F3460),
   ];
+  bool _gradientsRequested = false;
 
   @override
-  void initState() {
-    super.initState();
-    _loadColors();
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _requestGradientLoad();
   }
 
   @override
   void didUpdateWidget(CoverGradientBackground oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.url != widget.url) _loadColors();
+    if (oldWidget.url != widget.url) {
+      _gradientsRequested = false;
+      _requestGradientLoad();
+    }
+  }
+
+  void _requestGradientLoad() {
+    if (_gradientsRequested) return;
+    _gradientsRequested = true;
+    _loadColors();
   }
 
   Future<void> _loadColors() async {

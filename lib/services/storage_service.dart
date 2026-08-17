@@ -91,6 +91,17 @@ class StorageService {
   Future<void> setThemeMode(String value) =>
       _settingsBox.put('themeMode', value);
 
+  String? get audioSessionCookie =>
+      _settingsBox.get('audioSessionCookie') as String?;
+
+  Future<void> setAudioSessionCookie(String? value) async {
+    if (value == null || value.trim().isEmpty) {
+      await _settingsBox.delete('audioSessionCookie');
+    } else {
+      await _settingsBox.put('audioSessionCookie', value.trim());
+    }
+  }
+
   Future<Playlist> createPlaylist(String name) async {
     final playlist = Playlist(
       id: const Uuid().v4(),

@@ -1,12 +1,14 @@
 import 'dart:async';
+import 'dart:developer' as developer;
 
 import 'package:audio_service/audio_service.dart';
 import 'package:just_audio/just_audio.dart';
 
 import '../models/track.dart';
+import 'youtube_service.dart';
 
 class PlayerService {
-  PlayerService() {
+  PlayerService(this._youtube) {
     _player.playerStateStream.listen((state) {
       if (state.processingState == ProcessingState.completed) {
         final trackId = _loadedTrackId;
@@ -21,22 +23,72 @@ class PlayerService {
     });
     _player.positionStream.listen((_) => _emit());
     _player.durationStream.listen((_) => _emit());
+    _player.errorStream.listen((error) {
+      _logPlaybackRequestFailure();
+      _playbackErrors.add(error);
+      _emit();
+    });
   }
 
+  final YoutubeService _youtube;
   final AudioPlayer _player = AudioPlayer();
   final _changes = StreamController<void>.broadcast();
   final _trackCompleted = StreamController<void>.broadcast();
+  final _playbackErrors = StreamController<PlayerException>.broadcast();
   List<Track> _queue = [];
   int _index = 0;
   String? _loadedTrackId;
   String? _completedTrackId;
+  Uri? _lastStreamUri;
+  Map<String, String>? _lastStreamHeaders;
+  DateTime? _streamResolvedAt;
+
+  void _logPlaybackRequestFailure() {
+    final uri = _lastStreamUri;
+    final resolvedAt = _streamResolvedAt;
+    if (uri == null) return;
+    final now = DateTime.now();
+    final expiryEpoch = int.tryParse(uri.queryParameters['expire'] ?? '');
+    final expiresAt = expiryEpoch == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(expiryEpoch * 1000);
+
+    developer.log(
+      'stream request failed '
+      'urlIp=${uri.queryParameters['ip']} '
+      'itag=${uri.queryParameters['itag']} '
+      'resolvedAt=${resolvedAt?.toIso8601String() ?? '-'} '
+      'failedAt=${now.toIso8601String()} '
+      'resolveToFailureMs=${resolvedAt == null ? -1 : now.difference(resolvedAt).inMilliseconds} '
+      'expiresAt=${expiresAt?.toIso8601String() ?? '-'} '
+      'expiryRemainingMs=${expiresAt == null ? -1 : expiresAt.difference(now).inMilliseconds} '
+      'expiredBeforeRequest=${expiresAt != null && expiresAt.isBefore(now)}',
+      name: 'Flux.Playback',
+    );
+  }
 
   Stream<void> get changes => _changes.stream;
   Stream<void> get trackCompleted => _trackCompleted.stream;
+  Stream<PlayerException> get playbackErrors => _playbackErrors.stream;
   List<Track> get queue => List.unmodifiable(_queue);
   Track? get current =>
       _queue.isEmpty ? null : _queue[_index.clamp(0, _queue.length - 1)];
   String? get loadedTrackId => _loadedTrackId;
+
+  /// The stream URI of the most recent source handed to the native player.
+  ///
+  /// Kept so a playback error retry can detect that a re-extracted URL is
+  /// byte-identical to the one that just failed and avoid replaying the same
+  /// failing request against a fresh ExoPlayer instance.
+  Uri? get lastStreamUri => _lastStreamUri;
+
+  /// The headers sent with [lastStreamUri].
+  Map<String, String>? get lastStreamHeaders => _lastStreamHeaders;
+
+  /// The moment the URL in [lastStreamUri] was resolved by
+  /// [YoutubeService.audioUri]. The gap between this and a playback failure
+  /// decides whether the URL could have expired between resolving and playing.
+  DateTime? get lastResolvedAt => _streamResolvedAt;
   bool get playing => _player.playing;
   ProcessingState get processingState => _player.processingState;
   bool get isBuffering =>
@@ -70,9 +122,44 @@ class PlayerService {
     _emit();
   }
 
-  Future<void> playStream(Track track, Uri streamUri, {int? queueIndex}) async {
+  /// Starts playback of a resolved stream URL.
+  ///
+  /// [headers] must carry the headers that were used when the URL was
+  /// resolved: googlevideo rejects the stream when it is fetched by the
+  /// native player without them. When omitted, today's [YoutubeService]
+  /// [YoutubeService.playbackHeaders] are used.
+  ///
+  /// [resolvedAt] is the moment [streamUri] was resolved; it enables
+  /// diagnosing whether the URL expired in the gap between resolving and the
+  /// native player's first request for it.
+  Future<void> playStream(
+    Track track,
+    Uri streamUri, {
+    Map<String, String>? headers,
+    int? queueIndex,
+    DateTime? resolvedAt,
+  }) async {
+    final isRemote = streamUri.scheme == 'http' || streamUri.scheme == 'https';
+    final effectiveHeaders = isRemote
+        ? (headers ?? _youtube.playbackHeaders)
+        : null;
+
+    developer.log(
+      'ExoPlayer request uri=$streamUri '
+      'headers=${formatHeaders(effectiveHeaders)}',
+      name: 'Flux.Playback',
+    );
+
+    _lastStreamUri = streamUri;
+    _lastStreamHeaders = effectiveHeaders;
+    _streamResolvedAt = resolvedAt;
+
     await _player.setAudioSource(
-      AudioSource.uri(streamUri, tag: _mediaItem(track)),
+      AudioSource.uri(
+        streamUri,
+        headers: effectiveHeaders,
+        tag: _mediaItem(track),
+      ),
       initialPosition: Duration.zero,
     );
     _loadedTrackId = track.id;
@@ -82,6 +169,14 @@ class PlayerService {
     }
     _emit();
     await _player.play();
+    final resolvedAtForLog = _streamResolvedAt;
+    if (resolvedAtForLog != null) {
+      developer.log(
+        'playback request began '
+        'ageMs=${DateTime.now().difference(resolvedAtForLog).inMilliseconds}',
+        name: 'Flux.Playback',
+      );
+    }
     _emit();
   }
 
@@ -171,6 +266,7 @@ class PlayerService {
   Future<void> dispose() async {
     await _changes.close();
     await _trackCompleted.close();
+    await _playbackErrors.close();
     await _player.dispose();
   }
 }

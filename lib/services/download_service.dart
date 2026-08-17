@@ -19,14 +19,17 @@ class DownloadService {
     if (!await directory.exists()) await directory.create(recursive: true);
     final destination = File('${directory.path}/${track.id}.m4a');
     try {
-      final uri = await _youtube.audioUri(track);
+      final stream = await _youtube.audioUri(track);
       await Dio().downloadUri(
-        uri,
+        stream.url,
         destination.path,
         onReceiveProgress: (received, total) {
           onProgress?.call(total > 0 ? received / total : 0);
         },
-        options: Options(receiveTimeout: const Duration(minutes: 5)),
+        options: Options(
+          headers: stream.headers,
+          receiveTimeout: const Duration(minutes: 5),
+        ),
       );
       return track.copyWith(
         localPath: destination.path,
