@@ -71,11 +71,19 @@ class _SearchScreenState extends State<SearchScreen> {
               ),
             )
           else if (flux.results.isEmpty)
-            const Expanded(
-              child: _SearchMessage(
-                icon: Icons.graphic_eq_rounded,
-                message: 'Find the music moving through your day.',
-              ),
+            Expanded(
+              child: flux.recent.isNotEmpty
+                  ? ListView.builder(
+                      itemCount: flux.recent.length,
+                      itemBuilder: (_, index) => TrackTile(
+                        track: flux.recent[index],
+                        queue: flux.recent,
+                      ),
+                    )
+                  : const _SearchMessage(
+                      icon: Icons.graphic_eq_rounded,
+                      message: 'Find the music moving through your day.',
+                    ),
             )
           else
             Expanded(

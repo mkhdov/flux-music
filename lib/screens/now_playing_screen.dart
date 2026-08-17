@@ -26,6 +26,8 @@ class NowPlayingScreen extends StatelessWidget {
         .clamp(0, max.toInt())
         .toDouble();
     final remaining = flux.sleepRemaining;
+    final showPlayLoading = flux.isPlayButtonLoading;
+    final showNavLoading = flux.isNavigating;
     return GestureDetector(
       onVerticalDragEnd: (details) {
         if ((details.primaryVelocity ?? 0) > 350) {
@@ -36,7 +38,7 @@ class NowPlayingScreen extends StatelessWidget {
         backgroundColor: Colors.transparent,
         body: Stack(
           children: [
-            BlurredArtworkBackground(url: track.thumbnailUrl),
+            CoverGradientBackground(url: track.thumbnailUrl),
             Positioned.fill(
               child: DecoratedBox(
                 decoration: BoxDecoration(
@@ -44,12 +46,8 @@ class NowPlayingScreen extends StatelessWidget {
                     begin: Alignment.topCenter,
                     end: Alignment.bottomCenter,
                     colors: [
-                      Theme.of(
-                        context,
-                      ).colorScheme.surface.withValues(alpha: .48),
-                      Theme.of(
-                        context,
-                      ).colorScheme.surface.withValues(alpha: .95),
+                      Colors.black.withValues(alpha: .08),
+                      Colors.black.withValues(alpha: .42),
                     ],
                   ),
                 ),
@@ -190,14 +188,22 @@ class NowPlayingScreen extends StatelessWidget {
                               ),
                             ),
                             IconButton(
-                              onPressed: player.previous,
-                              icon: const Icon(
-                                Icons.skip_previous_rounded,
-                                size: 40,
-                              ),
+                              onPressed: showNavLoading ? null : flux.previous,
+                              icon: showNavLoading
+                                  ? const SizedBox(
+                                      width: 28,
+                                      height: 28,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2.5,
+                                      ),
+                                    )
+                                  : const Icon(
+                                      Icons.skip_previous_rounded,
+                                      size: 40,
+                                    ),
                             ),
                             FilledButton(
-                              onPressed: player.toggle,
+                              onPressed: showPlayLoading ? null : player.toggle,
                               style: FilledButton.styleFrom(
                                 shape: const CircleBorder(),
                                 padding: const EdgeInsets.all(17),
@@ -207,20 +213,37 @@ class NowPlayingScreen extends StatelessWidget {
                                 foregroundColor: Theme.of(
                                   context,
                                 ).colorScheme.surface,
+                                disabledBackgroundColor: Theme.of(
+                                  context,
+                                ).colorScheme.onSurface.withValues(alpha: 0.12),
                               ),
-                              child: Icon(
-                                player.playing
-                                    ? Icons.pause_rounded
-                                    : Icons.play_arrow_rounded,
-                                size: 39,
-                              ),
+                              child: showPlayLoading
+                                  ? const SizedBox(
+                                      width: 39,
+                                      height: 39,
+                                      child: CircularProgressIndicator(strokeWidth: 3),
+                                    )
+                                  : Icon(
+                                      player.playing
+                                          ? Icons.pause_rounded
+                                          : Icons.play_arrow_rounded,
+                                      size: 39,
+                                    ),
                             ),
                             IconButton(
-                              onPressed: player.next,
-                              icon: const Icon(
-                                Icons.skip_next_rounded,
-                                size: 40,
-                              ),
+                              onPressed: showNavLoading ? null : flux.next,
+                              icon: showNavLoading
+                                  ? const SizedBox(
+                                      width: 28,
+                                      height: 28,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2.5,
+                                      ),
+                                    )
+                                  : const Icon(
+                                      Icons.skip_next_rounded,
+                                      size: 40,
+                                    ),
                             ),
                             IconButton(
                               onPressed: player.cycleRepeat,

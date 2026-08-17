@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 
 import 'providers/flux_provider.dart';
 import 'screens/home_shell.dart';
+import 'services/audio_cache_service.dart';
 import 'services/download_service.dart';
 import 'services/player_service.dart';
 import 'services/storage_service.dart';
@@ -20,11 +21,14 @@ Future<void> main() async {
   final storage = StorageService();
   await storage.init();
   final youtube = YoutubeService();
+  final audioCache = AudioCacheService(youtube);
+  await audioCache.init();
   runApp(
     ChangeNotifierProvider(
       create: (_) => FluxProvider(
         storage,
         youtube,
+        audioCache,
         DownloadService(youtube),
         PlayerService(),
       ),

@@ -8,7 +8,8 @@ class QueueScreen extends StatelessWidget {
   const QueueScreen({super.key});
   @override
   Widget build(BuildContext context) {
-    final player = context.watch<FluxProvider>().player;
+    final flux = context.watch<FluxProvider>();
+    final player = flux.player;
     final tracks = player.queue;
     return Scaffold(
       appBar: AppBar(
@@ -33,16 +34,40 @@ class QueueScreen extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
-                  subtitle: Text(
-                    track.artist,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                  subtitle: Row(
+                    children: [
+                      if (track.isSuggested) ...[
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Theme.of(context).colorScheme.primaryContainer,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            'Suggested',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: Theme.of(context).colorScheme.onPrimaryContainer,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                      ],
+                      Expanded(
+                        child: Text(
+                          track.artist,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
                   ),
                   trailing: IconButton(
                     icon: const Icon(Icons.close_rounded),
                     onPressed: () => player.removeQueueItem(index),
                   ),
-                  onTap: () => player.skipTo(index),
+                  onTap: () => flux.skipTo(index),
                 );
               },
             ),

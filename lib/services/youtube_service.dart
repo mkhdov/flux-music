@@ -1,21 +1,14 @@
+import 'dart:async';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
 import '../models/track.dart';
-import 'direct_innertube_service.dart';
-import 'piped_fallback_service.dart';
-import 'ytdlp_service.dart';
-
 class YoutubeService {
   YoutubeService()
-    : _yt = YoutubeExplode(),
-      _directInnertube = DirectInnertubeService(),
-      _piped = PipedFallbackService(),
-      _ytdlp = YtDlpService();
+    : _yt = YoutubeExplode();
   final YoutubeExplode _yt;
-  final DirectInnertubeService _directInnertube;
-  final PipedFallbackService _piped;
-  final YtDlpService _ytdlp;
   final Map<String, _CachedAudioStream> _audioCache = {};
+  final Map<String, Future<AudioOnlyStreamInfo>> _activeExtractions = {};
 
   Future<List<Track>> search(String query) async {
     final results = await _yt.search.search(query);
@@ -34,117 +27,178 @@ class YoutubeService {
         .toList();
   }
 
-  Future<Uri> audioUri(Track track) async {
-    const maxRetries = 2; // 3 attempts total
+  Future<Uri> audioUri(Track track, {Stopwatch? sw}) async {
+    sw ??= Stopwatch()..start();
+    const maxRetries = 3; // 4 attempts total
     final fallbackErrors = <String>[];
 
     for (int i = 0; i <= maxRetries; i++) {
       fallbackErrors.clear();
       try {
-        return (await _bestAudioStream(track)).url;
+        final stream = await _bestAudioStream(track, sw: sw);
+        print('Diagnostic: [4] n-parameter decipher starts (if needed) at ${sw.elapsedMilliseconds}ms');
+        final url = stream.url;
+        print('Diagnostic: [5] Final stream URL obtained at ${sw.elapsedMilliseconds}ms');
+        return url;
       } on YoutubeAudioException catch (e) {
-        fallbackErrors.add('YouTube Explode:\n  ${e.message.replaceAll('\n', '\n  ')}');
+        if (e.message.toLowerCase().contains('bot') || e.message.toLowerCase().contains('sign in to confirm') || e.message.toLowerCase().contains('videounavailableexception') || e.message.contains('Unavailable:')) {
+           print('Diagnostic: Bot detection triggered for ${track.title}, aborting retries.');
+           throw YoutubeAudioException('Unavailable: Video is unavailable or YouTube blocked this track (Bot detection). Sign-in may be required.');
+        }
+        fallbackErrors.add('Attempt ${i + 1} - YouTube Explode:\n  ${e.message.replaceAll('\n', '\n  ')}');
       } catch (e) {
-        fallbackErrors.add('YouTube Explode: $e');
-      }
-
-      // Tier 2: direct ANDROID_VR innertube call (bypasses library wrapper)
-      try {
-        final directUri = await _directInnertube.audioUri(track);
-        if (directUri != null) return directUri;
-        fallbackErrors.add('Direct Innertube: Returned null');
-      } catch (e) {
-        fallbackErrors.add('Direct Innertube: $e');
-      }
-
-      // Tier 3: Piped public API instances
-      try {
-        final pipedUri = await _piped.audioUri(track);
-        if (pipedUri != null) return pipedUri;
-        fallbackErrors.add('Piped: Returned null');
-      } catch (e) {
-        fallbackErrors.add('Piped: $e');
-      }
-
-      // Tier 4: yt-dlp subprocess (Linux/macOS/Windows desktop only)
-      try {
-        final ytdlpUri = await _ytdlp.audioUri(track);
-        if (ytdlpUri != null) return ytdlpUri;
-        fallbackErrors.add('yt-dlp: Not installed or returned null');
-      } catch (e) {
-        fallbackErrors.add('yt-dlp: $e');
+        if (e.toString().toLowerCase().contains('bot') || e.toString().toLowerCase().contains('sign in to confirm') || e.toString().toLowerCase().contains('videounavailableexception') || e.toString().contains('VideoUnavailableException')) {
+           print('Diagnostic: Bot detection triggered for ${track.title}, aborting retries.');
+           throw YoutubeAudioException('Unavailable: Video is unavailable or YouTube blocked this track (Bot detection). Sign-in may be required.');
+        }
+        fallbackErrors.add('Attempt ${i + 1} - YouTube Explode: $e');
       }
 
       if (i < maxRetries) {
         // Exponential backoff
-        await Future.delayed(Duration(seconds: 2 * (i + 1)));
+        final backoffDelay = Duration(seconds: 2 * (i + 1));
+        print('Diagnostic: [Fallback] Retry ${i + 1} failed. Waiting ${backoffDelay.inSeconds}s before next attempt...');
+        await Future.delayed(backoffDelay);
       }
     }
 
-    final errorMessage = 'YouTube is temporarily limiting audio requests or blocked the request.\n\nDiagnostic Info:\n- ${fallbackErrors.join('\n- ')}';
+    final errorMessage = 'YouTube is temporarily limiting audio requests or blocked the request. (403/429)\n\nDiagnostic Info:\n- ${fallbackErrors.join('\n- ')}';
     throw YoutubeAudioException(errorMessage);
   }
 
-  Future<AudioOnlyStreamInfo> _bestAudioStream(Track track) async {
+  Future<AudioOnlyStreamInfo> _bestAudioStream(Track track, {Stopwatch? sw}) async {
+    sw ??= Stopwatch()..start();
     final cached = _audioCache[track.id];
     if (cached != null &&
         DateTime.now().difference(cached.resolvedAt) <
-            const Duration(minutes: 10)) {
+            const Duration(hours: 2)) {
       return cached.stream;
     }
-    // Try multiple API clients in order of preference.
-    // - androidVr: ANDROID_VR client — same as yt-dlp uses, no PO token needed
-    // - androidSdkless: Android without sdk version, avoids PO token requirement
-    // - ios: no signature deciphering needed
-    // - tv / safari / mweb: additional fallbacks with different signatures
-    // - default (empty): library default as last resort
-    final clients = [
-      [YoutubeApiClient.androidVr],
-      [YoutubeApiClient.androidSdkless],
-      [YoutubeApiClient.ios],
-      [YoutubeApiClient.tv],
-      [YoutubeApiClient.safari],
-      [YoutubeApiClient.mweb],
-      <YoutubeApiClient>[],  // library default
-    ];
 
-    final errors = <String>[];
-
-    for (final ytClients in clients) {
-      final clientName = ytClients.isEmpty ? 'default' : ytClients.first.toString();
-      try {
-        final manifest = ytClients.isEmpty
-            ? await _yt.videos.streamsClient.getManifest(track.id)
-            : await _yt.videos.streamsClient.getManifest(
-                track.id,
-                ytClients: ytClients,
-              );
-        if (manifest.audioOnly.isEmpty) {
-          throw const YoutubeAudioException(
-            'No audio-only stream is available for this track.',
-          );
-        }
-        final stream = manifest.audioOnly.withHighestBitrate();
-        _audioCache[track.id] = _CachedAudioStream(stream, DateTime.now());
-        return stream;
-      } on YoutubeAudioException catch (e) {
-        errors.add('$clientName: ${e.message}');
-      } on RequestLimitExceededException {
-        errors.add('$clientName: Rate Limited (429)');
-      } catch (e) {
-        errors.add('$clientName: $e');
-      }
+    if (_activeExtractions.containsKey(track.id)) {
+      print('Diagnostic: Joining existing extraction for ${track.title}');
+      return await _activeExtractions[track.id]!;
     }
 
-    throw YoutubeAudioException(
-      'All YouTube clients failed:\n${errors.join('\n')}',
-    );
+    final extractionFuture = _performParallelExtraction(track, sw);
+    _activeExtractions[track.id] = extractionFuture;
+
+    try {
+      final stream = await extractionFuture;
+      _audioCache[track.id] = _CachedAudioStream(stream, DateTime.now());
+      return stream;
+    } finally {
+      _activeExtractions.remove(track.id);
+    }
+  }
+
+  Future<AudioOnlyStreamInfo> _performParallelExtraction(Track track, Stopwatch sw) async {
+    // Reorder clients for reliability (iOS and androidSDKless often most reliable)
+    final clients = [
+      [YoutubeApiClient.ios],
+      [YoutubeApiClient.androidVr],
+      [YoutubeApiClient.androidSdkless],
+    ];
+
+    final completer = Completer<StreamManifest>();
+    int completedCount = 0;
+    final errors = <String>[];
+    bool hitBotDetection = false;
+
+    for (final ytClients in clients) {
+      final clientName = ytClients.first.toString();
+      print('Diagnostic: [2] Extraction request sent for ${track.title} using $clientName at ${sw.elapsedMilliseconds}ms');
+      
+      _yt.videos.streamsClient.getManifest(
+        track.id,
+        ytClients: ytClients,
+      ).timeout(const Duration(seconds: 4)).then((manifest) {
+        if (!completer.isCompleted) {
+          print('Diagnostic: [3] Player response received for ${track.title} via $clientName at ${sw.elapsedMilliseconds}ms');
+          completer.complete(manifest);
+        }
+      }).catchError((e) {
+        if (e.toString().toLowerCase().contains('bot') || e.toString().toLowerCase().contains('sign in to confirm') || e.toString().toLowerCase().contains('videounavailableexception') || e.toString().contains('VideoUnavailableException')) {
+          hitBotDetection = true;
+          print('Diagnostic: Bot detection explicitly hit on client $clientName for ${track.id} (${track.title})');
+        }
+        print('Diagnostic: [2] Extraction failed for $clientName with Error: $e');
+        errors.add('$clientName: $e');
+        completedCount++;
+        if (completedCount == clients.length && !completer.isCompleted) {
+          if (hitBotDetection) {
+             completer.completeError(YoutubeAudioException('Unavailable: Video is unavailable or sign in to confirm you\'re not a bot'));
+          } else {
+             completer.completeError(YoutubeAudioException('All YouTube clients failed:\n${errors.join('\n')}'));
+          }
+        }
+      });
+    }
+
+    final manifest = await completer.future;
+    
+    if (manifest.audioOnly.isEmpty) {
+      throw const YoutubeAudioException(
+        'No audio-only stream is available for this track.',
+      );
+    }
+    
+    AudioOnlyStreamInfo? stream;
+    final connectivity = await Connectivity().checkConnectivity();
+    final isWeakConnection = connectivity.contains(ConnectivityResult.mobile) ||
+        connectivity.contains(ConnectivityResult.bluetooth);
+
+    if (isWeakConnection) {
+      final sorted = manifest.audioOnly.sortByBitrate();
+      stream = sorted.first;
+    } else {
+      try { stream = manifest.audioOnly.firstWhere((s) => s.tag == 140); } catch (_) {}
+      if (stream == null) {
+        try { stream = manifest.audioOnly.firstWhere((s) => s.tag == 251); } catch (_) {}
+      }
+      stream ??= manifest.audioOnly.withHighestBitrate();
+    }
+    
+    return stream;
+  }
+
+  Future<void> prefetch(Track track) async {
+    try {
+      await audioUri(track);
+    } catch (_) {
+      // Ignore errors for prefetching
+    }
+  }
+
+  void prefetchTracks(Iterable<Track> tracks) {
+    for (final track in tracks) {
+      prefetch(track);
+    }
+  }
+
+  Future<List<Track>> getRelatedTracks(String videoId) async {
+    try {
+      final video = await _yt.videos.get(VideoId(videoId));
+      final related = await _yt.videos.getRelatedVideos(video);
+      if (related == null) return [];
+      return related
+          .where((v) => !v.isLive && v.duration != null)
+          .map((v) => Track(
+                id: v.id.value,
+                title: v.title,
+                artist: v.author,
+                thumbnailUrl: v.thumbnails.maxResUrl,
+                webUrl: v.url,
+                durationSeconds: v.duration!.inSeconds,
+              ))
+          .toList();
+    } catch (_) {
+      return [];
+    }
   }
 
   void dispose() {
     _yt.close();
-    _directInnertube.dispose();
-    _piped.dispose();
   }
 }
 

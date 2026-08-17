@@ -11,9 +11,11 @@ class MiniPlayer extends StatelessWidget {
   const MiniPlayer({super.key});
   @override
   Widget build(BuildContext context) {
-    final player = context.watch<FluxProvider>().player;
+    final flux = context.watch<FluxProvider>();
+    final player = flux.player;
     final track = player.current;
     if (track == null) return const SizedBox.shrink();
+    final showPlayLoading = flux.isPlayButtonLoading;
     return Padding(
       padding: const EdgeInsets.fromLTRB(10, 0, 10, 7),
       child: ClipRRect(
@@ -73,13 +75,19 @@ class MiniPlayer extends StatelessWidget {
                       ),
                     ),
                     IconButton(
-                      icon: Icon(
-                        player.playing
-                            ? Icons.pause_rounded
-                            : Icons.play_arrow_rounded,
-                        size: 30,
-                      ),
-                      onPressed: player.toggle,
+                      icon: showPlayLoading
+                          ? const SizedBox(
+                              width: 24,
+                              height: 24,
+                              child: CircularProgressIndicator(strokeWidth: 2.5),
+                            )
+                          : Icon(
+                              player.playing
+                                  ? Icons.pause_rounded
+                                  : Icons.play_arrow_rounded,
+                              size: 30,
+                            ),
+                      onPressed: showPlayLoading ? null : player.toggle,
                     ),
                   ],
                 ),

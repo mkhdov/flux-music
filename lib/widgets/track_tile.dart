@@ -17,13 +17,14 @@ class TrackTile extends StatelessWidget {
     final favorite = flux.storage.isFavorite(track.id);
     final downloaded = flux.storage.downloaded(track.id) != null;
     return ListTile(
+      enabled: !track.isUnavailable,
       contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 3),
       leading: Artwork(url: track.thumbnailUrl, size: 58, borderRadius: 10),
       title: Text(
         track.title,
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
-        style: const TextStyle(fontWeight: FontWeight.w600),
+        style: TextStyle(fontWeight: FontWeight.w600, color: track.isUnavailable ? Colors.grey : null),
       ),
       subtitle: Row(
         children: [
@@ -42,8 +43,8 @@ class TrackTile extends StatelessWidget {
           ],
         ],
       ),
-      onTap: () => _playAndOpen(context, flux),
-      trailing: PopupMenuButton<String>(
+      onTap: track.isUnavailable ? null : () => _playAndOpen(context, flux),
+      trailing: track.isUnavailable ? const Icon(Icons.error_outline, color: Colors.grey) : PopupMenuButton<String>(
         icon: const Icon(Icons.more_horiz_rounded),
         onSelected: (value) => _action(context, flux, value),
         itemBuilder: (_) => [
