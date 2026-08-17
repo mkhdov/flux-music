@@ -60,6 +60,7 @@ class StorageService {
 
   Future<void> cacheTrack(Track track) =>
       _catalogBox.put(track.id, track.toMap());
+
   Future<void> cacheTracks(Iterable<Track> tracks) =>
       Future.wait(tracks.map(cacheTrack));
 

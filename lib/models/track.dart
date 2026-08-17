@@ -9,7 +9,6 @@ class Track {
     this.localPath,
     this.addedAt,
     this.isSuggested = false,
-    this.isUnavailable = false,
   });
 
   final String id;
@@ -21,7 +20,6 @@ class Track {
   final String? localPath;
   final DateTime? addedAt;
   final bool isSuggested;
-  final bool isUnavailable;
 
   bool get isDownloaded => localPath != null && localPath!.isNotEmpty;
 
@@ -31,18 +29,18 @@ class Track {
     return '$minutes:$seconds';
   }
 
-  Track copyWith({String? localPath, DateTime? addedAt, bool? isSuggested, bool? isUnavailable}) => Track(
-    id: id,
-    title: title,
-    artist: artist,
-    thumbnailUrl: thumbnailUrl,
-    webUrl: webUrl,
-    durationSeconds: durationSeconds,
-    localPath: localPath ?? this.localPath,
-    addedAt: addedAt ?? this.addedAt,
-    isSuggested: isSuggested ?? this.isSuggested,
-    isUnavailable: isUnavailable ?? this.isUnavailable,
-  );
+  Track copyWith({String? localPath, DateTime? addedAt, bool? isSuggested}) =>
+      Track(
+        id: id,
+        title: title,
+        artist: artist,
+        thumbnailUrl: thumbnailUrl,
+        webUrl: webUrl,
+        durationSeconds: durationSeconds,
+        localPath: localPath ?? this.localPath,
+        addedAt: addedAt ?? this.addedAt,
+        isSuggested: isSuggested ?? this.isSuggested,
+      );
 
   Map<String, dynamic> toMap() => {
     'id': id,
@@ -54,7 +52,6 @@ class Track {
     'localPath': localPath,
     'addedAt': (addedAt ?? DateTime.now()).toIso8601String(),
     'isSuggested': isSuggested,
-    'isUnavailable': isUnavailable,
   };
 
   factory Track.fromMap(Map<dynamic, dynamic> map) => Track(
@@ -69,6 +66,5 @@ class Track {
         ? null
         : DateTime.tryParse(map['addedAt'] as String),
     isSuggested: map['isSuggested'] as bool? ?? false,
-    isUnavailable: map['isUnavailable'] as bool? ?? false,
   );
 }

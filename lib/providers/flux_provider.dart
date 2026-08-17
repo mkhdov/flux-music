@@ -20,7 +20,9 @@ class FluxProvider extends ChangeNotifier {
     this.player,
   ) {
     _playerSubscription = player.changes.listen((_) => _onPlayerChanged());
-    _completedSubscription = player.trackCompleted.listen((_) => _onTrackCompleted());
+    _completedSubscription = player.trackCompleted.listen(
+      (_) => _onTrackCompleted(),
+    );
   }
 
   final StorageService storage;
@@ -40,12 +42,11 @@ class FluxProvider extends ChangeNotifier {
   Timer? _sleepTimer;
   Timer? _sleepTicker;
   int _switchGeneration = 0;
-
-  bool get isNavigating => loadingTrackId != null;
+  String? _prefetchedQueueForTrackId;
+  int? _pendingQueueIndex;
 
   bool get isPlayButtonLoading =>
-      loadingTrackId != null &&
-      (player.loadedTrackId != loadingTrackId || player.isBuffering);
+      loadingTrackId != null && player.loadedTrackId != loadingTrackId;
 
   ThemeMode get themeMode => switch (storage.themeMode) {
     'light' => ThemeMode.light,
@@ -69,6 +70,15 @@ class FluxProvider extends ChangeNotifier {
         !player.isBuffering) {
       loadingTrackId = null;
     }
+    final current = player.current;
+    if (current != null &&
+        player.playing &&
+        !player.isBuffering &&
+        player.loadedTrackId == current.id &&
+        _prefetchedQueueForTrackId != current.id) {
+      _prefetchedQueueForTrackId = current.id;
+      _prefetchQueueAfterPlaybackStarts();
+    }
     notifyListeners();
   }
 
@@ -90,13 +100,13 @@ class FluxProvider extends ChangeNotifier {
   }
 
   Future<bool> play(Track track, {List<Track>? queue}) async {
-    if (track.isUnavailable) return false;
     final sw = Stopwatch()..start();
     final generation = ++_switchGeneration;
 
     loadingTrackId = track.id;
     actionError = null;
     notifyListeners();
+    var started = false;
     try {
       final merged = storage.downloaded(track.id) ?? track;
       if (queue != null) {
@@ -109,27 +119,28 @@ class FluxProvider extends ChangeNotifier {
       final uri = await _playbackUri(merged, sw: sw);
       if (generation != _switchGeneration) return false;
 
-      await player.playStream(merged, uri);
+      await player.playStream(
+        merged,
+        uri,
+        queueIndex: player.queue.indexWhere((t) => t.id == track.id),
+      );
       if (generation != _switchGeneration) return false;
+      started = true;
 
       await storage.addRecent(merged);
-      _prefetchAdjacent();
       notifyListeners();
       return true;
     } on YoutubeAudioException catch (error) {
       if (generation != _switchGeneration) return false;
-      if (error.message.startsWith('Unavailable:')) {
-        player.markTrackUnavailable(track.id);
-      }
       actionError = error.message;
-    } catch (_) {
+    } catch (error) {
       if (generation != _switchGeneration) return false;
       actionError =
           'Flux could not start this audio-only stream. Please retry.';
     } finally {
       if (generation == _switchGeneration &&
           loadingTrackId == track.id &&
-          player.loadedTrackId != track.id) {
+          !started) {
         loadingTrackId = null;
         notifyListeners();
       }
@@ -147,27 +158,19 @@ class FluxProvider extends ChangeNotifier {
   }
 
   Future<void> next() async {
-    if (player.queue.isEmpty || isNavigating) return;
+    if (player.queue.isEmpty) return;
 
     final currentId = player.current?.id;
-    final currentIndex = currentId == null
-        ? -1
-        : player.queue.indexWhere((t) => t.id == currentId);
+    final currentIndex =
+        _pendingQueueIndex ??
+        (currentId == null
+            ? -1
+            : player.queue.indexWhere((t) => t.id == currentId));
     int nextIndex = currentIndex + 1;
-
-    while (nextIndex < player.queue.length &&
-        player.queue[nextIndex].isUnavailable) {
-      nextIndex++;
-    }
 
     if (nextIndex >= player.queue.length) {
       if (player.loopMode == LoopMode.all) {
         nextIndex = 0;
-        while (nextIndex < player.queue.length &&
-            player.queue[nextIndex].isUnavailable) {
-          nextIndex++;
-        }
-        if (nextIndex >= player.queue.length) return;
       } else {
         return;
       }
@@ -181,32 +184,26 @@ class FluxProvider extends ChangeNotifier {
   }
 
   Future<void> previous() async {
-    if (player.queue.isEmpty || isNavigating) return;
-    if (player.position > const Duration(seconds: 4)) {
+    if (player.queue.isEmpty) return;
+    if (_pendingQueueIndex == null &&
+        player.position > const Duration(seconds: 4)) {
       await player.seek(Duration.zero);
       return;
     }
 
     final currentId = player.current?.id;
-    final currentIndex = currentId == null
-        ? -1
-        : player.queue.indexWhere((t) => t.id == currentId);
+    final currentIndex =
+        _pendingQueueIndex ??
+        (currentId == null
+            ? -1
+            : player.queue.indexWhere((t) => t.id == currentId));
     int prevIndex = currentIndex - 1;
-
-    while (prevIndex >= 0 && player.queue[prevIndex].isUnavailable) {
-      prevIndex--;
-    }
 
     if (prevIndex < 0) {
       if (player.loopMode == LoopMode.all) {
         prevIndex = player.queue.length - 1;
-        while (prevIndex >= 0 && player.queue[prevIndex].isUnavailable) {
-          prevIndex--;
-        }
-        if (prevIndex < 0) return;
       } else {
         prevIndex = 0;
-        if (player.queue.isNotEmpty && player.queue[0].isUnavailable) return;
       }
     }
 
@@ -216,66 +213,58 @@ class FluxProvider extends ChangeNotifier {
   Future<void> _switchToQueueIndex(int index) async {
     if (index < 0 || index >= player.queue.length) return;
     final track = player.queue[index];
-    if (track.isUnavailable) return;
 
     final generation = ++_switchGeneration;
+    _pendingQueueIndex = index;
     loadingTrackId = track.id;
     actionError = null;
     notifyListeners();
 
+    var started = false;
     try {
       final merged = storage.downloaded(track.id) ?? track;
       final uri = await _playbackUri(merged);
       if (generation != _switchGeneration) return;
 
-      player.updateIndex(index);
-      await player.playStream(merged, uri);
+      await player.playStream(merged, uri, queueIndex: index);
       if (generation != _switchGeneration) return;
+      started = true;
+      _pendingQueueIndex = null;
 
       await storage.addRecent(merged);
-      _prefetchAdjacent();
       notifyListeners();
     } on YoutubeAudioException catch (error) {
       if (generation != _switchGeneration) return;
-      if (error.message.startsWith('Unavailable:')) {
-        player.markTrackUnavailable(track.id);
-        loadingTrackId = null;
-        notifyListeners();
-        WidgetsBinding.instance.addPostFrameCallback((_) => next());
-      } else {
-        actionError = error.message;
-      }
-    } catch (_) {
+      actionError = error.message;
+    } catch (error) {
       if (generation != _switchGeneration) return;
       actionError = 'Could not play this track. Please retry.';
     } finally {
       if (generation == _switchGeneration &&
           loadingTrackId == track.id &&
-          player.loadedTrackId != track.id) {
+          !started) {
         loadingTrackId = null;
+        if (_pendingQueueIndex == index) _pendingQueueIndex = null;
         notifyListeners();
       }
     }
   }
 
-  void _prefetchAdjacent() {
+  void _prefetchQueueAfterPlaybackStarts() {
     final currentId = player.current?.id;
     final currentIndex = currentId == null
         ? -1
         : player.queue.indexWhere((t) => t.id == currentId);
     if (currentIndex == -1) return;
 
-    final toPrefetch = <Track>[];
-    for (final offset in [-2, -1, 1, 2]) {
-      final idx = currentIndex + offset;
-      if (idx >= 0 && idx < player.queue.length) {
-        final t = player.queue[idx];
-        if (!t.isUnavailable && storage.downloaded(t.id) == null) {
-          toPrefetch.add(t);
-        }
-      }
-    }
-    audioCache.prefetchTracks(toPrefetch);
+    // Resolve every queued stream URL in parallel only after the current song
+    // has started. This caches lightweight extraction metadata, not full audio.
+    audioCache.prefetchTracks(
+      player.queue.where(
+        (track) =>
+            track.id != currentId && storage.downloaded(track.id) == null,
+      ),
+    );
   }
 
   Future<Uri> _playbackUri(Track track, {Stopwatch? sw}) async {
@@ -293,11 +282,13 @@ class FluxProvider extends ChangeNotifier {
         final related = await youtube.getRelatedTracks(current.id);
         if (related.isNotEmpty) {
           for (final t in related.take(5)) {
+            await storage.cacheTrack(t);
             if (!player.queue.any((q) => q.id == t.id)) {
               await player.appendTrack(t.copyWith(isSuggested: true));
             }
           }
-          _prefetchAdjacent();
+          _prefetchedQueueForTrackId = null;
+          _onPlayerChanged();
         }
       }
     } finally {
@@ -306,8 +297,10 @@ class FluxProvider extends ChangeNotifier {
   }
 
   Future<void> skipTo(int index) async {
-    if (index < 0 || index >= player.queue.length || isNavigating) return;
-    if (index == player.queue.indexWhere((t) => t.id == player.current?.id)) {
+    if (index < 0 || index >= player.queue.length) return;
+    if (index ==
+        (_pendingQueueIndex ??
+            player.queue.indexWhere((t) => t.id == player.current?.id))) {
       return;
     }
     await _switchToQueueIndex(index);
@@ -327,9 +320,6 @@ class FluxProvider extends ChangeNotifier {
       final saved = await downloads.download(track);
       await storage.saveDownload(saved);
     } on YoutubeAudioException catch (error) {
-      if (error.message.startsWith('Unavailable:')) {
-        player.markTrackUnavailable(track.id);
-      }
       actionError = error.message;
     } catch (_) {
       actionError =
@@ -384,7 +374,10 @@ class FluxProvider extends ChangeNotifier {
     try {
       final merged = storage.downloaded(track.id) ?? track;
       await player.appendTrack(merged);
-      _prefetchAdjacent();
+      if (player.playing && !player.isBuffering) {
+        _prefetchedQueueForTrackId = null;
+        _onPlayerChanged();
+      }
     } catch (_) {
       actionError = 'This track could not be added to the queue. Please retry.';
     }

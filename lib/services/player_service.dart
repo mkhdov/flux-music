@@ -9,7 +9,13 @@ class PlayerService {
   PlayerService() {
     _player.playerStateStream.listen((state) {
       if (state.processingState == ProcessingState.completed) {
-        _trackCompleted.add(null);
+        final trackId = _loadedTrackId;
+        if (trackId != null && _completedTrackId != trackId) {
+          _completedTrackId = trackId;
+          _trackCompleted.add(null);
+        }
+      } else {
+        _completedTrackId = null;
       }
       _emit();
     });
@@ -23,6 +29,7 @@ class PlayerService {
   List<Track> _queue = [];
   int _index = 0;
   String? _loadedTrackId;
+  String? _completedTrackId;
 
   Stream<void> get changes => _changes.stream;
   Stream<void> get trackCompleted => _trackCompleted.stream;
@@ -63,12 +70,17 @@ class PlayerService {
     _emit();
   }
 
-  Future<void> playStream(Track track, Uri streamUri) async {
+  Future<void> playStream(Track track, Uri streamUri, {int? queueIndex}) async {
     await _player.setAudioSource(
       AudioSource.uri(streamUri, tag: _mediaItem(track)),
       initialPosition: Duration.zero,
     );
     _loadedTrackId = track.id;
+    _completedTrackId = null;
+    if (queueIndex != null) {
+      _index = queueIndex.clamp(0, _queue.isEmpty ? 0 : _queue.length - 1);
+    }
+    _emit();
     await _player.play();
     _emit();
   }
@@ -100,14 +112,6 @@ class PlayerService {
     _emit();
   }
 
-  void markTrackUnavailable(String trackId) {
-    final idx = _queue.indexWhere((t) => t.id == trackId);
-    if (idx != -1) {
-      _queue[idx] = _queue[idx].copyWith(isUnavailable: true);
-      _emit();
-    }
-  }
-
   Future<void> toggle() => playing ? _player.pause() : _player.play();
 
   Future<void> seek(Duration value) => _player.seek(value);
@@ -135,7 +139,7 @@ class PlayerService {
     if (oldIndex == newIndex) return;
     final moved = _queue.removeAt(oldIndex);
     _queue.insert(newIndex, moved);
-    
+
     if (_index == oldIndex) {
       _index = newIndex;
     } else if (oldIndex < _index && newIndex >= _index) {
@@ -166,6 +170,7 @@ class PlayerService {
 
   Future<void> dispose() async {
     await _changes.close();
+    await _trackCompleted.close();
     await _player.dispose();
   }
 }

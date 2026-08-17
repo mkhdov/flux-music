@@ -27,7 +27,6 @@ class NowPlayingScreen extends StatelessWidget {
         .toDouble();
     final remaining = flux.sleepRemaining;
     final showPlayLoading = flux.isPlayButtonLoading;
-    final showNavLoading = flux.isNavigating;
     return GestureDetector(
       onVerticalDragEnd: (details) {
         if ((details.primaryVelocity ?? 0) > 350) {
@@ -188,19 +187,11 @@ class NowPlayingScreen extends StatelessWidget {
                               ),
                             ),
                             IconButton(
-                              onPressed: showNavLoading ? null : flux.previous,
-                              icon: showNavLoading
-                                  ? const SizedBox(
-                                      width: 28,
-                                      height: 28,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2.5,
-                                      ),
-                                    )
-                                  : const Icon(
-                                      Icons.skip_previous_rounded,
-                                      size: 40,
-                                    ),
+                              onPressed: flux.previous,
+                              icon: const Icon(
+                                Icons.skip_previous_rounded,
+                                size: 40,
+                              ),
                             ),
                             FilledButton(
                               onPressed: showPlayLoading ? null : player.toggle,
@@ -221,7 +212,9 @@ class NowPlayingScreen extends StatelessWidget {
                                   ? const SizedBox(
                                       width: 39,
                                       height: 39,
-                                      child: CircularProgressIndicator(strokeWidth: 3),
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 3,
+                                      ),
                                     )
                                   : Icon(
                                       player.playing
@@ -231,19 +224,11 @@ class NowPlayingScreen extends StatelessWidget {
                                     ),
                             ),
                             IconButton(
-                              onPressed: showNavLoading ? null : flux.next,
-                              icon: showNavLoading
-                                  ? const SizedBox(
-                                      width: 28,
-                                      height: 28,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2.5,
-                                      ),
-                                    )
-                                  : const Icon(
-                                      Icons.skip_next_rounded,
-                                      size: 40,
-                                    ),
+                              onPressed: flux.next,
+                              icon: const Icon(
+                                Icons.skip_next_rounded,
+                                size: 40,
+                              ),
                             ),
                             IconButton(
                               onPressed: player.cycleRepeat,
